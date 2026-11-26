@@ -2,26 +2,43 @@
 import { useState, useEffect } from 'react'
 import './App.css'
 
-const equiposIniciales = [
-  { id: 1, nombre: 'Atlético Norte', escudo: '🦁', color: '#e85d3f' },
-  { id: 2, nombre: 'Real Caribe', escudo: '👑', color: '#3878f5' },
-  { id: 3, nombre: 'Deportivo Sur', escudo: '🐺', color: '#24a878' },
-  { id: 4, nombre: 'Unión Central', escudo: '🛡️', color: '#a56af5' },
-  { id: 5, nombre: 'Sporting FC', escudo: '⚡', color: '#e9a23b' },
-  { id: 6, nombre: 'Titanes FC', escudo: '🔥', color: '#e94c76' },
-]
+const API_URL = 'http://localhost:3001/api'
+
+const decoracionEquipos = {
+  1: { escudo: '🦁', color: '#e85d3f' },
+  2: { escudo: '👑', color: '#3878f5' },
+  3: { escudo: '🐺', color: '#24a878' },
+  4: { escudo: '🛡️', color: '#a56af5' },
+  5: { escudo: '⚡', color: '#e9a23b' },
+  6: { escudo: '🔥', color: '#e94c76' },
+}
+
+async function consultarDatos() {
+  const [respuestaEquipos, respuestaPartidos, respuestaTabla] =
+    await Promise.all([
+      fetch(`${API_URL}/teams`),
+      fetch(`${API_URL}/matches`),
+      fetch(`${API_URL}/standings`),
+    ])
+
+  if (!respuestaEquipos.ok || !respuestaPartidos.ok || !respuestaTabla.ok) {
+    throw new Error('No se pudieron cargar los datos del torneo.')
+  }
+
+  const [equipos, partidos, tabla] = await Promise.all([
+    respuestaEquipos.json(),
+    respuestaPartidos.json(),
+    respuestaTabla.json(),
+  ])
+
+  return { equipos, partidos, tabla }
+}
 
 function App() {
-  const [equipos] = useState(equiposIniciales)
-
-  const [partidos, setPartidos] = useState(() => {
-    try {
-      const guardados = localStorage.getItem('canchapro-partidos')
-      return guardados ? JSON.parse(guardados) : []
-    } catch {
-      return []
-    }
-  })
+  const [equiposApi, setEquiposApi] = useState([])
+  const [partidos, setPartidos] = useState([])
+  const [posiciones, setPosiciones] = useState([])
+  const [cargando, setCargando] = useState(true)
 
   const [local, setLocal] = useState('1')
   const [visitante, setVisitante] = useState('2')
@@ -31,14 +48,71 @@ function App() {
   const [mensaje, setMensaje] = useState('')
   const [tipoMensaje, setTipoMensaje] = useState('success')
 
+  const equipos = equiposApi.map((equipo) => ({
+    ...equipo,
+    nombre: equipo.name.split(' ').slice(0, -1).join(' '),
+    ...decoracionEquipos[equipo.id],
+  }))
+
+  const tabla = posiciones.map((equipo) => {
+    const datosEquipo = equipos.find((item) => item.id === equipo.id)
+
+    return {
+      ...datosEquipo,
+      pj: equipo.played,
+      pg: equipo.won,
+      pe: equipo.drawn,
+      pp: equipo.lost,
+      gf: equipo.goalsFor,
+      gc: equipo.goalsAgainst,
+      dg: equipo.goalDifference,
+      pts: equipo.points,
+    }
+  })
+
+  const partidosAdaptados = partidos.map((partido) => ({
+    id: partido.id,
+    local: partido.localTeamId,
+    visitante: partido.visitorTeamId,
+    golesLocal: partido.localGoals,
+    golesVisitante: partido.visitorGoals,
+  }))
+
   useEffect(() => {
-    localStorage.setItem('canchapro-partidos', JSON.stringify(partidos))
-  }, [partidos])
+    let activo = true
+
+    consultarDatos()
+      .then((datos) => {
+        if (!activo) return
+        setEquiposApi(datos.equipos)
+        setPartidos(datos.partidos)
+        setPosiciones(datos.tabla)
+      })
+      .catch((error) => {
+        if (!activo) return
+        setTipoMensaje('error')
+        setMensaje(error.message)
+      })
+      .finally(() => {
+        if (activo) setCargando(false)
+      })
+
+    return () => {
+      activo = false
+    }
+  }, [])
+
+  async function recargarDatos() {
+    const datos = await consultarDatos()
+    setEquiposApi(datos.equipos)
+    setPartidos(datos.partidos)
+    setPosiciones(datos.tabla)
+  }
 
   const obtenerEquipo = (id) =>
     equipos.find((equipo) => equipo.id === Number(id))
 
-  function registrarPartido(e) {
+  async function registrarPartido(e) {
     e.preventDefault()
 
     if (local === visitante) {
@@ -60,100 +134,68 @@ function App() {
       return
     }
 
-    const nuevoPartido = {
-      id: crypto.randomUUID(),
-      local: Number(local),
-      visitante: Number(visitante),
-      golesLocal: Number(golesLocal),
-      golesVisitante: Number(golesVisitante),
-    }
+    try {
+      const respuesta = await fetch(`${API_URL}/matches`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          localTeamId: Number(local),
+          visitorTeamId: Number(visitante),
+          localGoals: Number(golesLocal),
+          visitorGoals: Number(golesVisitante),
+        }),
+      })
 
-    setPartidos((anteriores) => [...anteriores, nuevoPartido])
-    setGolesLocal('')
-    setGolesVisitante('')
-    setTipoMensaje('success')
-    setMensaje('¡Resultado registrado correctamente!')
+      const resultado = await respuesta.json()
+
+      if (!respuesta.ok) {
+        throw new Error(resultado.message || 'No se pudo registrar el partido.')
+      }
+
+      await recargarDatos()
+
+      setGolesLocal('')
+      setGolesVisitante('')
+      setTipoMensaje('success')
+      setMensaje('¡Resultado registrado correctamente!')
+    } catch (error) {
+      setTipoMensaje('error')
+      setMensaje(error.message || 'Error al conectar con el servidor.')
+    }
   }
 
-  function eliminarPartido(id) {
-    setPartidos((anteriores) =>
-      anteriores.filter((partido) => partido.id !== id),
-    )
-    setTipoMensaje('success')
-    setMensaje('Resultado eliminado correctamente.')
+  async function eliminarPartido(id) {
+    try {
+      const respuesta = await fetch(`${API_URL}/matches/${id}`, {
+        method: 'DELETE',
+      })
+
+      const resultado = await respuesta.json()
+
+      if (!respuesta.ok) {
+        throw new Error(resultado.message || 'No se pudo eliminar el partido.')
+      }
+
+      await recargarDatos()
+
+      setTipoMensaje('success')
+      setMensaje('Resultado eliminado correctamente.')
+    } catch (error) {
+      setTipoMensaje('error')
+      setMensaje(error.message || 'Error al conectar con el servidor.')
+    }
   }
 
-  const estadisticas = equipos.map((equipo) => {
-    const datos = partidos.reduce(
-      (acc, partido) => {
-        if (partido.local === equipo.id) {
-          acc.pj++
-          acc.gf += partido.golesLocal
-          acc.gc += partido.golesVisitante
-
-          if (partido.golesLocal > partido.golesVisitante) {
-            acc.pg++
-            acc.pts += 3
-          } else if (partido.golesLocal === partido.golesVisitante) {
-            acc.pe++
-            acc.pts++
-          } else {
-            acc.pp++
-          }
-        }
-
-        if (partido.visitante === equipo.id) {
-          acc.pj++
-          acc.gf += partido.golesVisitante
-          acc.gc += partido.golesLocal
-
-          if (partido.golesVisitante > partido.golesLocal) {
-            acc.pg++
-            acc.pts += 3
-          } else if (partido.golesVisitante === partido.golesLocal) {
-            acc.pe++
-            acc.pts++
-          } else {
-            acc.pp++
-          }
-        }
-
-        return acc
-      },
-      {
-        pj: 0,
-        pg: 0,
-        pe: 0,
-        pp: 0,
-        gf: 0,
-        gc: 0,
-        pts: 0,
-      },
-    )
-
-    return {
-      ...equipo,
-      ...datos,
-      dg: datos.gf - datos.gc,
-    }
-  })
-
-  const tabla = [...estadisticas].sort(
-    (a, b) =>
-      b.pts - a.pts ||
-      b.dg - a.dg ||
-      b.gf - a.gf ||
-      a.nombre.localeCompare(b.nombre),
-  )
-
-  const partidosFiltrados = partidos.filter(
+  const partidosFiltrados = partidosAdaptados.filter(
     (partido) =>
       filtro === 'todos' ||
       partido.local === Number(filtro) ||
       partido.visitante === Number(filtro),
   )
 
-  const totalGoles = partidos.reduce(
+  const totalGoles = partidosAdaptados.reduce(
     (total, partido) =>
       total + partido.golesLocal + partido.golesVisitante,
     0,
@@ -252,6 +294,7 @@ function App() {
               id="local"
               value={local}
               onChange={(e) => setLocal(e.target.value)}
+              disabled={cargando}
             >
               {equipos.map((equipo) => (
                 <option key={equipo.id} value={equipo.id}>
@@ -297,6 +340,7 @@ function App() {
               id="visitante"
               value={visitante}
               onChange={(e) => setVisitante(e.target.value)}
+              disabled={cargando}
             >
               {equipos.map((equipo) => (
                 <option key={equipo.id} value={equipo.id}>
@@ -319,7 +363,11 @@ function App() {
               </p>
             )}
 
-            <button className="primary-button" type="submit">
+            <button
+              className="primary-button"
+              type="submit"
+              disabled={cargando}
+            >
               Registrar resultado <span>→</span>
             </button>
           </form>
